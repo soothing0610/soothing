@@ -1,0 +1,1034 @@
+
+import numpy as np
+import mne
+import matplotlib.pyplot as plt
+import pandas as pd
+from decimal import Decimal
+import glob
+import os
+import re
+
+from scipy import stats, signal
+np.random.seed(42)
+
+
+from itertools import product
+
+
+# %%
+directory_path = os.path.abspath(os.path.join(os.path.dirname('ptsd_eeg'), '..', 'edf')) 
+csv_files_pattern = os.path.join(directory_path, '*_intervalMarker.csv')
+edf_files_pattern = os.path.join(directory_path, '*.md.edf')
+csv_files = glob.glob(csv_files_pattern)
+edf_files = glob.glob(edf_files_pattern)
+
+directory_path = os.path.abspath(os.path.join(os.path.dirname('ptsd_eeg'), '..', 'csv')) 
+csv_eeg_files_pattern = os.path.join(directory_path, '*.fe.bp.csv')
+csv_eeg_files = glob.glob(csv_eeg_files_pattern)
+
+# Function to extract identifier from filename
+def extract_identifier(filename):
+    match = re.search(r'(\d+)_EPOCX', filename)
+    if match:
+        return match.group(1)
+    return None
+
+
+# %%
+file_pairs = {}
+
+# Match CSV and EDF files based on identifier
+for csv_file in csv_files:
+    identifier = extract_identifier(csv_file)
+    if identifier:
+        file_pairs[identifier] = {'csv': csv_file}
+
+for edf_file in edf_files:
+    identifier = extract_identifier(edf_file)
+    if identifier and identifier in file_pairs:
+        file_pairs[identifier]['edf'] = edf_file
+
+for csv_eeg_file in csv_eeg_files:
+    identifier = extract_identifier(csv_eeg_file)
+    if identifier:
+        file_pairs[identifier]['csv_eeg'] = csv_eeg_file
+
+
+
+# %%
+def crop_dataframe(df, timewindows):
+    cropped_data = []
+    for start, end in timewindows:
+        cropped_data.append(df[(df['Timestamp'] >= start) & (df['Timestamp'] < end)])
+    return cropped_data
+
+# %% [markdown]
+# #### CSD Transform
+# 
+# References
+# [1]
+# F. Perrin, O. Bertrand, and J. Pernier. Scalp Current Density Mapping: Value and Estimation from Potential Data. IEEE Transactions on Biomedical Engineering, BME-34(4):283–288, 1987. doi:10.1109/TBME.1987.326089.
+# 
+# [2]
+# François M. Perrin, Jacques Pernier, Olivier M. Bertrand, and Jean Franćois Echallier. Spherical splines for scalp potential and current density mapping. Electroencephalography and Clinical Neurophysiology, 72(2):184–187, 1989. doi:10.1016/0013-4694(89)90180-6.
+# 
+# [3]
+# Mike X. Cohen. Analyzing Neural Time Series Data: Theory and Practice. MIT Press, 2014.
+# 
+# [4]
+# Jürgen Kayser and Craig E. Tenke. On the benefits of using surface Laplacian (Current Source Density) methodology in electrophysiology. International journal of psychophysiology : official journal of the International Organization of Psychophysiology, 97(3):171–173, 2015. doi:10.1016/j.ijpsycho.2015.06.001.
+
+# %%
+#ICA (Data decomposition using Independent Component Analysis)
+from mne.preprocessing import ICA
+from time import time
+
+""
+
+def run_ica(raw,method,n_components=14,fit_params=None, random_state=None, plot=False):
+    ica = ICA(
+        n_components=n_components,
+        method=method,
+        fit_params=fit_params,
+        max_iter="auto",
+        random_state=random_state,
+    )
+    t0 = time()
+    ica.fit(raw, reject=None)
+    if plot:
+        fit_time = time() - t0
+        title = f"ICA decomposition using {method} (took {fit_time:.1f}s)"
+        ica.plot_components(title=title)
+    return ica
+
+#설명하는 Variance 구하려면 아래 코드 이용.
+"""
+
+explained_var_ratio = ica.get_explained_variance_ratio(raw)
+for channel_type, ratio in explained_var_ratio.items():
+    print(
+        f"Fraction of {channel_type} variance explained by all components: " f"{ratio}"
+    )
+    
+explained_var_ratio = ica.get_explained_variance_ratio(
+    raw, components=[0], ch_type="eeg"
+)
+# This time, print as percentage.
+ratio_percent = round(100 * explained_var_ratio["eeg"])
+print(
+    f"Fraction of variance in EEG signal explained by first component: "
+    f"{ratio_percent}%"
+)
+
+
+"""
+
+"""
+[1]
+Aapo Hyvärinen. Fast and robust fixed-point algorithms for independent component analysis. IEEE Transactions on Neural Networks, 10(3):626–634, 1999. doi:10.1109/72.761722.
+
+[2]
+Anthony J. Bell and Terrence J. Sejnowski. An information-maximization approach to blind separation and blind deconvolution. Neural Computation, 7(6):1129–1159, 1995. doi:10.1162/neco.1995.7.6.1129.
+
+[3]
+Te-Won Lee, Mark Girolami, and Terrence J. Sejnowski. Independent component analysis using an extended infomax algorithm for mixed subgaussian and supergaussian sources. Neural Computation, 11(2):417–441, 1999. doi:10.1162/089976699300016719.
+
+[4]
+Pierre Ablin, Jean-Francois Cardoso, and Alexandre Gramfort. Faster Independent Component Analysis by preconditioning with hessian approximations. IEEE Transactions on Signal Processing, 66(15):4040–4049, 2018. doi:10.1109/TSP.2018.2844203."""
+
+
+
+
+# %%
+intervention0 = pd.read_excel('/Users/piprober/Desktop/ptsd_eeg/EEGpattern.xlsx', engine='openpyxl', header=1)
+intervention0.columns = ['identity', 'exclude', '_','lp','lp2','F3','F4','F8','P7','P8','O1','O2','AF3','AF4','FC5','FC6','T7','T8','gamephase','19']
+intervention0 = intervention0[['identity','F3','F4','F8','P7','P8','O1','O2','AF3','AF4','FC5','FC6','T7','T8','gamephase']]
+participants0 = np.array(intervention0['identity'][0:]).astype(int)
+intervention0
+
+# %%
+intervention = pd.read_excel('/Users/piprober/Desktop/ptsd_eeg/intervention pattern.xlsx', engine='openpyxl', header=1)
+intervention.columns = ['identity', 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]
+#intervention['identity'] = intervention['identity'].str.replace('id', '')
+participants = np.array(intervention['identity'][0:]).astype(int)
+
+
+# %%
+intervention_chnames = list(intervention0.columns)
+intervention_chnames.remove('identity')
+intervention_chnames.remove('gamephase')
+print(intervention_chnames)
+
+
+# %%
+##Forward / Reverse / Con vs Uncon
+### CSV file -> MNE RAW data
+
+eegreference=True #mean 빼기
+csd_transform = False #Take spatial Laplacian of the sensor signal (derivative in both x and y)
+
+n_components=14
+ica = False # #None 
+checkica = False
+explained_variance_ratios = {}
+icas = {}
+
+normalization = False
+moving_average = False
+
+#frequency filter
+low_freq = 0.1
+high_freq = 45
+
+selected_columns_eeg_csv = ['Timestamp', 'EEG.AF3',	'EEG.F7','EEG.F3','EEG.FC5','EEG.T7','EEG.P7','EEG.O1','EEG.O2','EEG.P8','EEG.T8','EEG.FC6','EEG.F4','EEG.F8','EEG.AF4']
+# I excluded 'EEG.RawCq'
+new_column_names = {col: col.replace('EEG.', '') for col in selected_columns_eeg_csv}
+
+#Define Raw info
+sfreq = 128 
+ch_names = ['AF3','F7','F3','FC5','T7','P7','O1','O2','P8','T8','FC6','F4','F8','AF4']
+#commonchannel = ['AF3', 'F7', 'F3', 'FC5', 'T8', 'F8']
+info = mne.create_info(ch_names=ch_names, sfreq=sfreq, ch_types='eeg')
+montage = mne.channels.make_standard_montage('standard_1020')
+
+#Define Events (8초 forward + 8초 reverse + 3초 rest for 18 games : reverse is conscious state for 0,2,4,... unconscious for 1,3,5,...)
+# condition 1 : forward
+# condition 2 : conscious reverse
+# condition 3 : unconscious reverse
+# condition 4 : rest
+events = []
+sfreq = 128  
+forward_duration = 8
+reverse_duration = 8
+rest_duration = 3
+n_games = 18
+
+events = []
+for i in range(n_games):
+    start_forward = i * (forward_duration + reverse_duration + rest_duration) * sfreq
+    events.append([int(start_forward), 0, 1])
+    start_reverse = start_forward + forward_duration * sfreq
+    if i % 2 == 0: #conscious
+        events.append([int(start_reverse), 0, 2])
+    else:
+        events.append([int(start_reverse), 0, 3])
+    start_sample_rest = start_reverse + reverse_duration * sfreq
+    events.append([int(start_sample_rest), 0, 4])
+
+events = np.array(events)
+
+data = {}
+corrupted_data = {'no game_start':[], 'not single game start':[], 'ended before the whole game':[], 'not enough files':[], 'not in intervention':[], 'some channels bad':[]}
+reverse = {}
+raws = {}
+for identifier, files in file_pairs.items():
+    if int(identifier) not in participants:
+        corrupted_data['not in intervention'].append(identifier)
+        continue
+    else:
+        if 'csv' in files and 'edf' in files and 'csv_eeg' in files:
+            df = pd.read_csv(files['csv'])
+            df['timestamp'] = df['timestamp'].apply(lambda x: Decimal(str(x)))
+            if 'game_start' in list(df['type']):
+                timestamps = df[df['type'] == 'game_start']['timestamp']
+                if len(timestamps) == 0:
+                    corrupted_data['no game_start'].append(identifier)
+                else:
+                    if len(timestamps) != 1:
+                        corrupted_data['not single game start'].append(identifier)
+                    data[identifier] = {}
+                    reverse[identifier] = {}
+                    eeg = pd.read_csv(files['csv_eeg'],  header=1)
+                    eeg['Timestamp'] = eeg['Timestamp'].apply(lambda x: Decimal(str(x)))
+                    eeg = eeg[selected_columns_eeg_csv]
+                    eeg.rename(columns=new_column_names, inplace=True)
+                    gamestart = timestamps.values[-1]
+                    eeg = eeg[eeg['Timestamp'] >= gamestart] # Only eegs after game starts.
+                    #before_game = (initial_time, gamestart)
+                    eegraw = eeg[ch_names].values.T
+                    if len(eegraw[0]) != 0:
+                        raw = mne.io.RawArray(eegraw, info)
+                        raw.info.set_montage(montage)
+                        raw.filter(l_freq=low_freq, h_freq=high_freq)
+                        #badchannel = [channel for channel in intervention_chnames if not np.array(intervention0[intervention0['identity']==int(identifier)][channel].isna())[0]]
+                        #if len(badchannel) > 0:
+                        #    corrupted_data['some channels bad'].append((identifier, badchannel))
+                        #if len(badchannel) == 14:
+                        #    corrupted_data['some channels bad'].append(identifier)
+                        #    del data[identifier]
+                        #    continue
+                        #if len(badchannel) > 4:
+                        #    corrupted_data['some channels bad'].append((identifier, badchannel))
+                        #    del data[identifier]
+                        #    continue
+                        #raw.info['bads'] = list(set(ch_names) - set(commonchannel))
+                        #raw = raw.pick_types(eeg=True, exclude='bads')
+                        if eegreference:
+                            raw.set_eeg_reference(projection=True).apply_proj()
+                        if ica :
+                            ica = mne.preprocessing.ICA(n_components=2, method='picard', max_iter='auto', random_state=42)
+                            ica.fit(raw)
+                            raw = ica.apply(raw) ##########################################################################################change
+                            icas[identifier] = ica
+                            if checkica:
+                                mixing_matrix = ica.mixing_matrix_
+                                # Compute the explained variance ratio for each component
+                                variance = np.var(mixing_matrix, axis=0)
+                                explained_variance_ratios[identifier] = variance / np.sum(variance)
+                        if csd_transform:
+                            raw = mne.preprocessing.compute_current_source_density(raw)
+                        if normalization:
+                            dataa = raw.get_data()  # Extract data, shape (n_channels, n_times)
+                            mean = np.mean(dataa, axis=1, keepdims=True)
+                            std = np.std(dataa, axis=1, keepdims=True)
+                            data_zscore = (dataa - mean) / std
+                            raw = mne.io.RawArray(data_zscore, raw.info)
+                        if moving_average:
+                            n = 5  # Window size (samples)
+                            # Apply the moving average to each channel
+                            smoothed_data = np.apply_along_axis(lambda m: np.convolve(m, np.ones(n)/n, mode='valid'), axis=1, arr=raw.get_data())
+                            # If you need to maintain the original data shape, you might pad the result
+                            padded_smoothed_data = np.pad(smoothed_data, ((0, 0), (n//2, n-1-n//2)), mode='edge')
+                            # Replace raw data with the smoothed data
+                            raw._data = padded_smoothed_data
+                        reverse[identifier]['con'] = []
+                        reverse[identifier]['uncon'] = []
+                        if raw.times[-1] < 19*18:
+                            corrupted_data['ended before the whole game'].append(identifier)
+                        else:
+                            epochs = mne.Epochs(raw, events, event_id={'forward': 1, 'conscious': 2, 'unconscious': 3}, tmin=0, tmax=8, baseline=None, preload=True)
+                            epochs.drop_channels(epochs.info['bads'])
+                            #normalize
+                            #dataa = epochs.get_data()  # shape is (n_epochs, n_channels, n_times)
+                            #mean = np.mean(dataa, axis=2, keepdims=True)
+                            #std = np.std(dataa, axis=2, keepdims=True)
+                            #data_zscore = (dataa - mean) / std
+                            #epochs._data = data_zscore
+                            rest_epoch = mne.Epochs(raw, events, event_id={'rest':4}, tmin=0, tmax=3, baseline=None)
+                            data[identifier] = epochs
+                            #rest_epoch은 버림
+            else:
+                corrupted_data['no game_start'].append(identifier)
+        else:
+            corrupted_data['not enough files'].append(identifier)
+
+# %%
+#Forward / Reverse / Con vs Uncon
+### CSV file -> MNE RAW data
+
+eegreference=True #mean 빼기
+csd_transform = False #Take spatial Laplacian of the sensor signal (derivative in both x and y)
+
+n_components=14
+ica = False # #None 
+checkica = True
+explained_variance_ratios = {}
+icas = {}
+
+normalization = True
+moving_average = True
+
+#frequency filter
+low_freq = 0.1
+high_freq = 40
+
+selected_columns_eeg_csv = ['Timestamp', 'EEG.AF3',	'EEG.F7','EEG.F3','EEG.FC5','EEG.T7','EEG.P7','EEG.O1','EEG.O2','EEG.P8','EEG.T8','EEG.FC6','EEG.F4','EEG.F8','EEG.AF4']
+# I excluded 'EEG.RawCq'
+new_column_names = {col: col.replace('EEG.', '') for col in selected_columns_eeg_csv}
+
+#Define Raw info
+sfreq = 128 
+ch_names = ['AF3','F7','F3','FC5','T7','P7','O1','O2','P8','T8','FC6','F4','F8','AF4']
+info = mne.create_info(ch_names=ch_names, sfreq=sfreq, ch_types='eeg')
+montage = mne.channels.make_standard_montage('standard_1020')
+
+#Define Events (8초 forward + 8초 reverse + 3초 rest for 18 games : reverse is conscious state for 0,2,4,... unconscious for 1,3,5,...)
+# condition 1 : forward
+# condition 2 : conscious reverse
+# condition 3 : unconscious reverse
+# condition 4 : rest
+events = []
+sfreq = 128  
+forward_duration = 8
+reverse_duration = 8
+rest_duration = 3
+n_games = 18
+
+events = []
+for i in range(n_games):
+    start_forward = i * (forward_duration + reverse_duration + rest_duration) * sfreq
+    events.append([int(start_forward), 0, 1])
+    start_reverse = start_forward + forward_duration * sfreq
+    if i % 2 == 0: #conscious
+        events.append([int(start_reverse), 0, 2])
+    else:
+        events.append([int(start_reverse), 0, 3])
+    start_sample_rest = start_reverse + reverse_duration * sfreq
+    events.append([int(start_sample_rest), 0, 4])
+
+events = np.array(events)
+
+data = {}
+corrupted_data = {'no game_start':[], 'not single game start':[], 'ended before the whole game':[], 'not enough files':[], 'not in intervention':[], 'some channels bad':[]}
+reverse = {}
+raws = {}
+
+for identifier in participants:
+    if identifier in [9,10,11,17,18,20,21,29,33,39,40,43,51,57,144]:
+        continue
+    identifier = f'{identifier:03d}'
+    files = file_pairs[identifier]
+    if int(identifier) not in participants:
+        corrupted_data['not in intervention'].append(identifier)
+        continue
+    #if int(identifier) in [34, 53, 79, 82, 143]:
+    #    corrupted_data['some channels bad'].append(identifier)
+    #    continue
+    else:
+        if 'csv' in files and 'edf' in files and 'csv_eeg' in files:
+            df = pd.read_csv(files['csv'])
+            df['timestamp'] = df['timestamp'].apply(lambda x: Decimal(str(x)))
+            if 'game_start' in list(df['type']):
+                timestamps = df[df['type'] == 'game_start']['timestamp']
+                if len(timestamps) == 0:
+                    corrupted_data['no game_start'].append(identifier)
+                else:
+                    if len(timestamps) != 1:
+                        corrupted_data['not single game start'].append(identifier)
+                    data[identifier] = {}
+                    reverse[identifier] = {}
+                    eeg = pd.read_csv(files['csv_eeg'],  header=1)
+                    eeg['Timestamp'] = eeg['Timestamp'].apply(lambda x: Decimal(str(x)))
+                    eeg = eeg[selected_columns_eeg_csv]
+                    eeg.rename(columns=new_column_names, inplace=True)
+                    gamestart = timestamps.values[-1]
+                    eeg = eeg[eeg['Timestamp'] >= gamestart] # Only eegs after game starts.
+                    #before_game = (initial_time, gamestart)
+                    eegraw = eeg[ch_names].values.T
+                    if len(eegraw[0]) != 0:
+                        raw = mne.io.RawArray(eegraw, info)
+                        raw.info.set_montage(montage)
+                        raw.filter(l_freq=low_freq, h_freq=high_freq)
+                        #badchannel = [channel for channel in intervention_chnames if not np.array(intervention0[intervention0['identity']==int(identifier)][channel].isna())[0]]
+                        #if len(badchannel) > 0:
+                        #    corrupted_data['some channels bad'].append((identifier, badchannel))
+                        #if len(badchannel) == 14:
+                        #    corrupted_data['some channels bad'].append(identifier)
+                        #    del data[identifier]
+                        #    continue
+                        #if len(badchannel) > 4:
+                        #    corrupted_data['some channels bad'].append((identifier, badchannel))
+                        #    del data[identifier]
+                        #    continue
+                        #raw.info['bads'] = list(set(ch_names) - set(commonchannel))
+                        #raw = raw.pick_types(eeg=True, exclude='bads')
+                        if eegreference:
+                            raw.set_eeg_reference(projection=True).apply_proj()
+                        if ica :
+                            ica = mne.preprocessing.ICA(n_components=2, method='picard', max_iter='auto', random_state=42)
+                            ica.fit(raw)
+                            raw = ica.apply(raw) ##########################################################################################change
+                            icas[identifier] = ica
+                            if checkica:
+                                mixing_matrix = ica.mixing_matrix_
+                                # Compute the explained variance ratio for each component
+                                variance = np.var(mixing_matrix, axis=0)
+                                explained_variance_ratios[identifier] = variance / np.sum(variance)
+                        if csd_transform:
+                            raw = mne.preprocessing.compute_current_source_density(raw)
+                        if normalization:
+                            dataa = raw.get_data()  # Extract data, shape (n_channels, n_times)
+                            mean = np.mean(dataa, axis=1, keepdims=True)
+                            std = np.std(dataa, axis=1, keepdims=True)
+                            data_zscore = (dataa - mean) / std
+                            raw = mne.io.RawArray(data_zscore, raw.info)
+                        if moving_average:
+                            n = 5  # Window size (samples)
+                            # Apply the moving average to each channel
+                            smoothed_data = np.apply_along_axis(lambda m: np.convolve(m, np.ones(n)/n, mode='valid'), axis=1, arr=raw.get_data())
+                            # If you need to maintain the original data shape, you might pad the result
+                            padded_smoothed_data = np.pad(smoothed_data, ((0, 0), (n//2, n-1-n//2)), mode='edge')
+                            # Replace raw data with the smoothed data
+                            raw._data = padded_smoothed_data
+                        reverse[identifier]['con'] = []
+                        reverse[identifier]['uncon'] = []
+                        if raw.times[-1] < 19*18:
+                            corrupted_data['ended before the whole game'].append(identifier)
+                        else:
+                            epochs = mne.Epochs(raw, events, event_id={'forward': 1, 'conscious': 2, 'unconscious': 3}, tmin=0, tmax=8, baseline=None, preload=True)
+                            epochs.drop_channels(epochs.info['bads'])
+                            #normalize
+                            #dataa = epochs.get_data()  # shape is (n_epochs, n_channels, n_times)
+                            #mean = np.mean(dataa, axis=2, keepdims=True)
+                            #std = np.std(dataa, axis=2, keepdims=True)
+                            #data_zscore = (dataa - mean) / std
+                            #epochs._data = data_zscore
+                            rest_epoch = mne.Epochs(raw, events, event_id={'rest':4}, tmin=0, tmax=3, baseline=None)
+                            data[identifier] = epochs
+                            #rest_epoch은 버림
+            else:
+                corrupted_data['no game_start'].append(identifier)
+        else:
+            corrupted_data['not enough files'].append(identifier)
+
+# %%
+print(f'number of participants used : {len(data.keys())}')
+
+# %%
+#combined_epochs : 사람, 시기간의 차이 없다고 가정.(오로지 forward,conscious,unconscious의 차이만 있다고 가정)
+combined_epochs = list(data.values())
+combined_epochs = mne.concatenate_epochs(combined_epochs)
+print(combined_epochs)
+
+# %%
+n_segmentation_per_game = 4
+segmentation_length = 8/n_segmentation_per_game
+
+# %%
+#3. 푸리에 변환을 사용한 스펙트럼 분석:
+def compute_fft(data, fs):
+    n = len(data)
+    freq = np.fft.fftfreq(n, d=1/fs)
+    fft = np.fft.fft(data)
+    return freq, np.abs(fft)
+
+#4. 파워 스펙트럼 밀도 (PSD) 계산:
+def compute_psd(data, fs):
+    f, Pxx = signal.welch(data, fs, nperseg=1024) #nperseg is the Length of each segment -> reference?
+    return f, Pxx
+
+#5. 특정 주파수 대역의 파워 비교:
+def band_power(f, Pxx, fmin, fmax):
+    idx = np.logical_and(f >= fmin, f <= fmax)
+    return np.trapz(Pxx[idx], f[idx])
+
+#band difference confidence interval
+def bootstrap(data, num_bootstrap_samples=100000):
+    n = len(data)
+    bootstrap_means = np.empty(num_bootstrap_samples)
+    for i in range(num_bootstrap_samples):
+        sample = np.random.choice(data, size=n, replace=True)  # Resample with replacement
+        bootstrap_means[i] = np.mean(sample)
+    return bootstrap_means
+
+ch = ['AF3',
+ 'F7',
+ 'F3',
+ 'FC5',
+ 'T7',
+ 'P7',
+ 'O1',
+ 'O2',
+ 'P8',
+ 'T8',
+ 'FC6',
+ 'F4',
+ 'F8',
+ 'AF4']
+
+
+freq_bands = {
+    'Delta': (0.5, 4),
+    'Theta': (4, 8),
+    'Alpha': (8, 13),
+    'Beta': (13, 30),
+    'Gamma': (30, 100)
+}
+
+bands = freq_bands
+
+con = combined_epochs['conscious']
+con_data = con.get_data() #(n_epochs, n_channels, n_times)
+n_epochs, n_channels, n_times = con_data.shape
+
+fmin= 0.1
+fmax = 100
+psds_list = []
+
+uncon = combined_epochs['unconscious']
+uncon_data = uncon.get_data() #(n_epochs, n_channels, n_times)
+n_epochs, n_channels, n_times = uncon_data.shape
+
+
+
+ch_names = ['AF3', 'F7', 'F3', 'FC5', 'T7', 'P7', 'O1', 'O2', 'P8', 'T8', 'FC6', 'F4', 'F8', 'AF4']
+
+#band difference confidence interval
+def bootstrap(data, num_bootstrap_samples=10000):
+    n = len(data)
+    bootstrap_means = np.empty(num_bootstrap_samples)
+    for i in range(num_bootstrap_samples):
+        sample = np.random.choice(data, size=n, replace=True)  # Resample with replacement
+        bootstrap_means[i] = np.mean(sample)
+    return bootstrap_means
+
+
+
+freqencies_a = {quant : {'Gamma':{}, 'Beta':{}, 'Alpha':{}, 'Theta':{}, 'Delta':{}} for quant in range(n_segmentation_per_game)}
+freqencies_b = {quant : {'Gamma':{}, 'Beta':{}, 'Alpha':{}, 'Theta':{}, 'Delta':{}} for quant in range(n_segmentation_per_game)}
+differences = {quant : {'Gamma':{}, 'Beta':{}, 'Alpha':{}, 'Theta':{}, 'Delta':{}} for quant in range(n_segmentation_per_game)}
+
+for quant in range(n_segmentation_per_game):
+    for powerbandy in ['Gamma', 'Beta', 'Alpha', 'Theta', 'Delta']:
+        differences[quant][powerbandy] = {channel:[] for channel in ch_names}
+        freqencies_a[quant][powerbandy] = {channel:[] for channel in ch_names}
+        freqencies_b[quant][powerbandy] = {channel:[] for channel in ch_names}
+        for iiii, channel in enumerate(ch_names):
+            for id, epoch1 in data.items():
+                con = epoch1['conscious']
+                uncon = epoch1['unconscious']
+
+                # Get the data from epochs
+                conepochs_data = con.get_data()  # Shape: (n_epochs, n_channels, n_times)
+                unconepochs_data = uncon.get_data()  # Shape: (n_epochs, n_channels, n_times)
+                conepochs_data = conepochs_data.transpose(1,0,2)
+                unconepochs_data = unconepochs_data.transpose(1,0,2)
+                
+                # Reshape the data to create a 2D array for Raw
+                n_channels, n_epochs, n_times = conepochs_data.shape
+                concatenated_data1 = conepochs_data.reshape(n_channels, n_epochs * n_times)
+                unconcatenated_data1 = unconepochs_data.reshape(n_channels, n_epochs * n_times)
+
+                # Create a new Raw object
+                info = epoch1.info  # Use the same info as the original epochs
+                raw_a = mne.io.RawArray(concatenated_data1, info)
+                raw_b = mne.io.RawArray(unconcatenated_data1, info)
+
+                # 데이터 추출
+                for i in range(9):
+                    raw_aa = raw_a.copy().crop(tmin=(i*8)+(quant*segmentation_length), tmax=(i*8)+((quant+1)*segmentation_length))
+                    raw_bb = raw_b.copy().crop(tmin=(i*8)+(quant*segmentation_length), tmax=(i*8)+((quant+1)*segmentation_length))
+                    data_a = raw_aa.get_data()
+                    data_b = raw_bb.get_data()
+                    f_a, Pxx_a = compute_psd(data_a[iiii], fs=sfreq)
+                    f_b, Pxx_b = compute_psd(data_b[iiii], fs=sfreq)
+                    powers_a = {band: band_power(f_a, Pxx_a, fmin, fmax) for band, (fmin, fmax) in bands.items()}
+                    powers_b = {band: band_power(f_b, Pxx_b, fmin, fmax) for band, (fmin, fmax) in bands.items()}
+                    freqencies_a[quant][powerbandy][channel].append(powers_a[powerbandy])
+                    freqencies_b[quant][powerbandy][channel].append(powers_b[powerbandy])
+                    difference = powers_b[powerbandy] - powers_a[powerbandy]
+                    differences[quant][powerbandy][channel].append(difference)
+
+# %%
+
+# statistical tests
+results = {#'paired t-test(two sided)':{},
+           #'paired t-test(one sided) : pos > neg':{},
+           # 'paired t-test(one sided) : pos < neg':{},
+           'Wilcoxon signed-rank test(two sided)':{},
+          # 'Wilcoxon signed-rank test(one sided) : pos > neg':{},
+          #  'Wilcoxon signed-rank test(one sided) : pos < neg':{},
+           #'paired t-test(one sided) with correction':{}
+           }
+for key,item in results.items():
+    results[key] = {channel : {powerbandy : [] for powerbandy in bands} for channel in ch_names}
+
+
+results['significant results'] = {channel: {powerbandy:[] for powerbandy in bands} for channel in ch_names}
+
+medians = {quant : {channel : {powerbandy : [] for powerbandy in bands} for channel in ch_names} for quant in range(n_segmentation_per_game)}
+
+
+for channel in ch_names:
+    for powerbandy in bands:
+        data1 = []
+        data2 = []
+        for quant in range(n_segmentation_per_game):
+            data1 = data1 + freqencies_a[quant][powerbandy][channel]
+            data2 = data2 + freqencies_b[quant][powerbandy][channel]
+        
+        median = np.median(np.array(differences[quant][powerbandy][channel]),axis=-1)
+        medians[quant][channel][powerbandy] = median
+        
+        #results['paired t-test(two sided)'][channel][powerbandy] = stats.ttest_rel(data1, data2)
+        #if results['paired t-test(two sided)'][channel][powerbandy].pvalue < 0.05:
+        #    results['significant results'][channel][powerbandy].append(('paired t-test(two sided)', results['paired t-test(two sided)'][channel][powerbandy]))
+            
+        #results['paired t-test(one sided) : pos > neg'][channel][powerbandy] = stats.ttest_rel(data1, data2, alternative='greater')
+        #if results['paired t-test(one sided) : pos > neg'][channel][powerbandy].pvalue < 0.05:
+        #    results['significant results'][channel][powerbandy].append(('paired t-test(one sided) : pos > neg', results['paired t-test(one sided) : pos > neg'][channel][powerbandy]))
+        
+        #results['paired t-test(one sided) : pos < neg'][channel][powerbandy] = stats.ttest_rel(data1, data2, alternative='less')
+        #if results['paired t-test(one sided) : pos < neg'][channel][powerbandy].pvalue < 0.05:
+        #    results['significant results'][channel][powerbandy].append(('paired t-test(one sided) : pos < neg', results['paired t-test(one sided) : pos < neg'][channel][powerbandy]))
+
+        results['Wilcoxon signed-rank test(two sided)'][channel][powerbandy] = stats.wilcoxon(data1, data2)
+        if results['Wilcoxon signed-rank test(two sided)'][channel][powerbandy].pvalue < 0.05:
+            results['significant results'][channel][powerbandy] = results['Wilcoxon signed-rank test(two sided)'][channel][powerbandy]
+
+        #results['Wilcoxon signed-rank test(one sided) : pos > neg'][channel][powerbandy] = stats.wilcoxon(data1, data2, alternative='greater')
+        #if results['Wilcoxon signed-rank test(one sided) : pos > neg'][channel][powerbandy].pvalue < 0.05:
+        #    results['significant results'][channel][powerbandy].append(('Wilcoxon signed-rank test(one sided) : pos > neg', results['Wilcoxon signed-rank test(one sided) : pos > neg'][channel][powerbandy]))
+
+        #results['Wilcoxon signed-rank test(one sided) : pos < neg'][channel][powerbandy] = stats.wilcoxon(data1, data2, alternative='less')
+        #if results['Wilcoxon signed-rank test(one sided) : pos < neg'][channel][powerbandy].pvalue < 0.05:
+        #    results['significant results'][channel][powerbandy].append(('Wilcoxon signed-rank test(one sided) : pos < neg', results['Wilcoxon signed-rank test(one sided) : pos < neg'][channel][powerbandy]))
+
+for channel, powerbandy in product(ch_names, bands):
+    if len(results['significant results'][channel][powerbandy]) == 0:
+        del results['significant results'][channel][powerbandy]
+        
+for channel in ch_names:
+    if results['significant results'][channel] == {}:
+        del results['significant results'][channel]
+
+
+
+# %%
+combined_differences = {'Gamma':{}, 'Beta':{}, 'Alpha':{}, 'Theta':{}, 'Delta':{}}
+for powerbandy in ['Gamma', 'Beta', 'Alpha', 'Theta', 'Delta']:
+    combined_differences[powerbandy] = {channel:[] for channel in ch_names}
+    for channel in ch_names:
+        for quant in range(n_segmentation_per_game):
+            combined_differences[powerbandy][channel] += differences[quant][powerbandy][channel]
+
+# %%
+df_list = []
+for test, dataaa in results.items():
+    if test == 'significant results':
+        print('hi')
+        continue
+    for region, freq_data in dataaa.items():
+        for band, statresults in freq_data.items():
+            value = np.median(np.array(combined_differences[band][region]),axis=-1)  ########### MEDIAN
+            df_list.append([region, band, value, statresults[0], statresults[1]])
+
+df = pd.DataFrame(df_list, columns=['Region', 'Frequency Band', 'median', 'Statistic', 'P-Value'])
+#df.to_excel(f'{n_segmentation_per_game}등분후통합통계정리_conuncon.xlsx')
+
+# %%
+N = 1440
+mu_W = (N)*(N+1)/4
+sigma_W = np.sqrt(N*(N+1)*(2*N+1)/24)
+df['deviation'] = (df['Statistic'] - mu_W)/sigma_W
+df
+
+# %%
+
+for quant in range(n_segmentation_per_game):
+    data = {'Wilcoxon signed-rank test(one sided) : con > uncon': results['Wilcoxon signed-rank test(one sided) : con > uncon'][quant],'Wilcoxon signed-rank test(one sided) : con < uncon': results['Wilcoxon signed-rank test(one sided) : con < uncon'][quant], 'Wilcoxon signed-rank test(two sided)':results['Wilcoxon signed-rank test(two sided)'][quant]}
+    df_list = []
+
+    # Iterate over the dictionary and append rows
+    for test, regions in data.items():
+        for region, freq_band_results in regions.items():
+            for band, (stat, pval) in freq_band_results.items():
+                df_list.append([test, region, band, stat, pval])
+
+    # Convert the list to a DataFrame
+    df = pd.DataFrame(df_list, columns=['Test', 'Region', 'Frequency Band', 'Statistic', 'p-value'])
+
+    print(df)
+    # Save the DataFrame to an Excel file
+    excel_file_path = f'Q{quant+1}_our_of{n_segmentation_per_game}_conuncon_test_results.xlsx'  # Change the path as needed
+    df.to_excel(excel_file_path, index=False)
+    
+    records = []
+    for channel, tests in results['significant results'][quant].items():
+        for frequency_band, test_results in tests.items():
+            for test_name, p_value in test_results:
+                records.append((channel, frequency_band, test_name, p_value))
+
+    df = pd.DataFrame(records, columns=["Channel", "Frequency Band", "Test", "P-value"])
+    print(df)
+
+    excel_file_path = f'Q{quant+1}_our_of{n_segmentation_per_game}_conuncon_significant_results(0.1-45).xlsx'
+    df.to_excel(excel_file_path, index=False)
+    
+    
+
+# %%
+np.random.seed(6)
+
+for confidence_level in [0.95]:
+    for quant in range(n_segmentation_per_game):
+        # Assume person can be different. Take statistical test on the difference.
+        confidence_interval = {}
+        p_values = {}
+        p_values_wilcoxons={}
+        bootstrap_results = {}
+        for powerbandy in differences[quant].keys():
+            confidence_interval[powerbandy] = {}
+            p_values[powerbandy] = {}
+            p_values_wilcoxons[powerbandy] = {}
+            bootstrap_results[powerbandy] = {}
+            for iiii, channel in enumerate(ch_names):
+                t_stat, p_value = stats.ttest_1samp(differences[quant][powerbandy][channel], 0)
+                #print(f"p value of t-test on difference in theta band of EEG channel {ch_names[channel]}: {p_value}")
+                p_values[powerbandy][channel] = p_value
+                
+                w_statistic, p_value_wilcoxon = stats.wilcoxon(differences[quant][powerbandy][channel])
+                p_values_wilcoxons[powerbandy][channel] = p_value_wilcoxon
+                
+                bootstrap_means = bootstrap(differences[quant][powerbandy][channel])
+                bootstrap_results[powerbandy][channel] = bootstrap_means
+                lower_bound = np.percentile(bootstrap_means, (1 - confidence_level) / 2 * 100)
+                upper_bound = np.percentile(bootstrap_means, (1 + confidence_level) / 2 * 100)
+                #print(f"{confidence_level*100}% Confidence Interval for channel {ch_names[channel]}: [{lower_bound}, {upper_bound}]")
+                confidence_interval[powerbandy][channel] = (round(lower_bound,2), round(upper_bound,2))
+        df = pd.DataFrame(confidence_interval)
+        file_path = f'Q{quant+1}_conneg_confidence_interval_{confidence_level}.xlsx'
+        df.to_excel(file_path)
+
+# %%
+confidence_interval['Beta']
+
+# %% [markdown]
+# ## Topographical Model for Visualization
+
+# %%
+### Topological Plot with deviations
+all_values = []
+for powerbandy in ['Theta','Alpha', 'Beta', 'Gamma']:
+    for ch in epochs.info['ch_names']:
+        value = np.array(df[df['Region']==ch][df['Frequency Band']==powerbandy]['P-Value'])[0]
+        all_values.append(value)
+
+vmin = np.min(all_values)  # global minimum
+vmax = np.max(all_values)  # global maximum
+
+
+fig, ax = plt.subplots(1, 4, figsize=(13, 3))
+for jjjj, powerbandy in enumerate(['Theta','Alpha', 'Beta', 'Gamma']):
+    values = []
+    for ch in epochs.info['ch_names']:
+        value = np.array(df[df['Region']==ch][df['Frequency Band']==powerbandy]['P-Value'])[0]
+        values.append(value)
+    img,_ = mne.viz.plot_topomap(values, epochs.info, ch_type='eeg', sensors=True, cmap='RdBu_r', 
+                                 vlim=(vmin, vmax), show=False, names=epochs.info.ch_names, axes=ax[jjjj])
+    ax[jjjj].set_title(powerbandy, fontsize=16, fontweight='bold')
+ax_x_start = 0.98
+ax_x_width = 0.02
+ax_y_start = 0.1
+ax_y_height = 0.9
+cbar_ax = fig.add_axes([ax_x_start, ax_y_start, ax_x_width, ax_y_height])
+clb = fig.colorbar(img, cax=cbar_ax)
+plt.tight_layout()
+plt.show()
+
+# %%
+### Topological Plot with deviations
+all_values = []
+for powerbandy in ['Theta','Alpha', 'Beta', 'Gamma']:
+    for ch in epochs.info['ch_names']:
+        value = np.median(np.array(combined_differences[powerbandy][ch]))
+        all_values.append(value)
+
+vmin = np.min(all_values)  # global minimum
+vmax = np.max(all_values)  # global maximum
+vmmaxx = np.max([np.abs(vmin), np.abs(vmax)])
+vmin = -vmmaxx
+vmax = vmmaxx
+
+
+mask_param = dict(marker='o', markerfacecolor='y', markeredgecolor='k',
+        linewidth=0, markersize=15)
+
+fig, ax = plt.subplots(1, 4, figsize=(10, 3))
+significant_channel_power = []
+for jjjj, powerbandy in enumerate(['Theta','Alpha', 'Beta', 'Gamma']):
+    values = []
+    pvalues = []
+    for ch in epochs.info['ch_names']:
+        pvalue = np.array(df[df['Region']==ch][df['Frequency Band']==powerbandy]['P-Value'])[0]
+        if pvalue < 0.05:
+            pvalues.append(True)
+            significant_channel_power.append((powerbandy, ch))
+
+        else:
+            pvalues.append(False)
+        value = np.median(np.array(combined_differences[powerbandy][ch]))
+        values.append(value)
+    pvalues = np.array(pvalues)
+    img,_ = mne.viz.plot_topomap(values, epochs.info, ch_type='eeg', sensors=True, # cmap='Reds', 
+                                 contours=10, 
+                                 names=epochs.info.ch_names,
+                                 mask=pvalues, mask_params=mask_param,
+                                 vlim=(vmin, vmax), show=False,  axes=ax[jjjj])
+    ax[jjjj].set_title(powerbandy, fontsize=16, fontweight='bold')
+ax_x_start = 0.98
+ax_x_width = 0.02
+ax_y_start = 0.1
+ax_y_height = 0.9
+cbar_ax = fig.add_axes([ax_x_start, ax_y_start, ax_x_width, ax_y_height])
+clb = fig.colorbar(img, cax=cbar_ax)
+plt.tight_layout()
+plt.show()
+
+# %%
+#delta
+powerdifference = []
+for ch in epochs.info['ch_names']:
+    powerdifference.append(combined_differences['Delta'][ch])
+powerdifference = np.array(powerdifference)
+powerdifference = np.median(powerdifference, axis=-1)
+print(powerdifference)
+
+fig, ax = plt.subplots(1)
+img,_ = mne.viz.plot_topomap(powerdifference, epochs.info, ch_type='eeg', sensors=True, cmap='RdBu_r',show=False,names=epochs.info.ch_names,axes=ax)
+ax_x_start = 0.95
+ax_x_width = 0.04
+ax_y_start = 0.1
+ax_y_height = 0.9
+cbar_ax = fig.add_axes([ax_x_start, ax_y_start, ax_x_width, ax_y_height])
+clb = fig.colorbar(img,cbar_ax)
+ax.set_title("Delta")
+
+
+# %%
+#Theta
+powerdifference = []
+for ch in epochs.info['ch_names']:
+    powerdifference.append(combined_differences['Theta'][ch])
+powerdifference = np.array(powerdifference)
+powerdifference = np.median(powerdifference, axis=-1)
+print(powerdifference)
+
+fig, ax = plt.subplots(1)
+mne.viz.plot_topomap(powerdifference, epochs.info, ch_type='eeg', sensors=True, cmap='RdBu_r',show=False,names=epochs.info.ch_names,axes=ax)
+ax_x_start = 0.95
+ax_x_width = 0.04
+ax_y_start = 0.1
+ax_y_height = 0.9
+cbar_ax = fig.add_axes([ax_x_start, ax_y_start, ax_x_width, ax_y_height])
+clb = fig.colorbar(img, cax=cbar_ax)
+ax.set_title("Theta")
+
+
+
+# %%
+#alpha
+powerdifference = []
+for ch in epochs.info['ch_names']:
+    powerdifference.append(combined_differences['Alpha'][ch])
+powerdifference = np.array(powerdifference)
+powerdifference = np.median(powerdifference, axis=-1)
+print(powerdifference)
+
+fig, ax = plt.subplots(1)
+img,_ = mne.viz.plot_topomap(powerdifference, epochs.info, ch_type='eeg', sensors=True, cmap='RdBu_r',show=False,names=epochs.info.ch_names,axes=ax)
+ax_x_start = 0.95
+ax_x_width = 0.04
+ax_y_start = 0.1
+ax_y_height = 0.9
+cbar_ax = fig.add_axes([ax_x_start, ax_y_start, ax_x_width, ax_y_height])
+clb = fig.colorbar(img, cax=cbar_ax)
+ax.set_title("Alpha")
+
+
+# %%
+#betta
+powerdifference = []
+for ch in epochs.info['ch_names']:
+    powerdifference.append(combined_differences['Beta'][ch])
+powerdifference = np.array(powerdifference)
+powerdifference = np.median(powerdifference, axis=-1)
+print(powerdifference)
+fig, ax = plt.subplots(1)
+mne.viz.plot_topomap(powerdifference, epochs.info, ch_type='eeg', sensors=True, cmap='RdBu_r',show=False,names=epochs.info.ch_names,axes=ax)
+ax_x_start = 0.95
+ax_x_width = 0.04
+ax_y_start = 0.1
+ax_y_height = 0.9
+cbar_ax = fig.add_axes([ax_x_start, ax_y_start, ax_x_width, ax_y_height])
+clb = fig.colorbar(img, cax=cbar_ax)
+ax.set_title("Beta")
+
+
+
+# %%
+#gamma
+powerdifference = []
+for ch in epochs.info['ch_names']:
+    powerdifference.append(combined_differences['Gamma'][ch])
+powerdifference = np.array(powerdifference)
+powerdifference = np.median(powerdifference, axis=-1)
+print(powerdifference)
+
+fig, ax = plt.subplots(1)
+mne.viz.plot_topomap(powerdifference, epochs.info, ch_type='eeg', sensors=True, cmap='RdBu_r',show=False,names=epochs.info.ch_names,axes=ax)
+ax_x_start = 0.95
+ax_x_width = 0.04
+ax_y_start = 0.1
+ax_y_height = 0.9
+cbar_ax = fig.add_axes([ax_x_start, ax_y_start, ax_x_width, ax_y_height])
+clb = fig.colorbar(img, cax=cbar_ax)
+ax.set_title("Gamma")
+
+
+# %%
+bands = {
+    'Delta': (0.5, 4),
+    'Theta': (4, 8),
+    'Alpha': (8, 13),
+    'Beta': (13, 30),
+    'Gamma': (30, 100)
+}
+
+
+n_segmentation_per_game = 4
+segmentation_length = 8/n_segmentation_per_game
+
+sfreq = 128 
+ch_names = ['AF3','F7','F3','FC5','T7','P7','O1','O2','P8','T8','FC6','F4','F8','AF4']
+info = mne.create_info(ch_names=ch_names, sfreq=sfreq, ch_types='eeg')
+montage = mne.channels.make_standard_montage('standard_1020')
+
+events = []
+for jj in range(n_games):
+    newgamestart = jj * 8
+    for i in range(n_segmentation_per_game):
+        start = (newgamestart + i * segmentation_length) * sfreq
+        events.append([int(start), 0, (i+1)])
+events = np.array(events)
+event_id = {f'q{i+1}/{n_segmentation_per_game}': (i+1) for i in range(n_segmentation_per_game)}
+
+datadifference = {}
+for quant in range(n_segmentation_per_game):
+    for id, epoch1 in data.items():
+        con = epoch1['conscious']
+        uncon = epoch1['unconscious']
+
+        conepochs_data = con.get_data()  # Shape: (n_epochs, n_channels, n_times)
+        unconepochs_data = uncon.get_data()  # Shape: (n_epochs, n_channels, n_times)
+        conepochs_data = conepochs_data.transpose(1,0,2)
+        unconepochs_data = unconepochs_data.transpose(1,0,2)
+        
+        # Reshape the data to create a 2D array for Raw
+        n_channels, n_epochs, n_times = conepochs_data.shape
+        concatenated_data1 = conepochs_data.reshape(n_channels, n_epochs * n_times)
+        unconcatenated_data1 = unconepochs_data.reshape(n_channels, n_epochs * n_times)
+
+        # Create a new Raw object
+        info = epoch1.info  # Use the same info as the original epochs
+        raw_a = mne.io.RawArray(concatenated_data1, info)
+        raw_b = mne.io.RawArray(unconcatenated_data1, info)
+        
+        data_a = raw_a.get_data()
+        data_b = raw_b.get_data()
+        rawdifference = data_a - data_b
+        raw = mne.io.RawArray(rawdifference, info)
+        raw.info.set_montage(montage)
+        epochs = mne.Epochs(raw, events, event_id=event_id, tmin=0, tmax=8, baseline=None, preload=True)
+        
+        datadifference[id] = epochs
+
+
+
+# %%
+#combined_epochs
+combined_epochs = list(data.values())
+combined_epochs = mne.concatenate_epochs(combined_epochs)
+print(combined_epochs)
+
+# %%
+con = combined_epochs['conscious']
+uncon = combined_epochs['unconscious']
+
+conevoked = con.average()
+unconevoked = uncon.average()
+
+conevoked.plot_psd_topomap(bands=bands, normalize=True)
+
+# %%
+unconevoked.plot_psd_topomap(bands=bands,normalize=True)
